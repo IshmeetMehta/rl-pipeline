@@ -1,0 +1,90 @@
+# ==============================================================================
+# NeMo RL GRPO - FINAL CONSOLIDATED CONFIG (NCCL & 2-Node Optimized)
+# ==============================================================================
+
+# 1. Experiments & Tracking
+logger:
+  log_dir: /mount/gcs/logs/nemo_grpo_experiment
+  num_val_samples_to_print: 10
+  tensorboard_enabled: true
+  wandb_enabled: false
+  monitor_gpus: true
+  gpu_monitoring:
+    collection_interval: 10
+    flush_interval: 10
+
+# 2. Weights & Metrics
+checkpointing:
+  enabled: true
+  save_period: 10
+  checkpoint_dir: checkpoints
+  metric_name: "train:reward"
+  higher_is_better: true
+  keep_top_k: 3
+  model_save_format: "safetensors"
+
+# 3. Infrastructure (2 Nodes, 2 GPUs each)
+cluster:
+  num_nodes: 2
+  gpus_per_node: 2
+
+trainer:
+  precision: bf16-mixed
+  devices: 2
+  num_nodes: 2
+  strategy: ddpp
+  max_steps: 1000
+  accumulate_grad_batches: 1
+
+# 4. Dataset
+data:
+  dataset_name: 'ResponseDataset'
+  train_data_path: '/mount/gcs/dataset/train.jsonl'
+  processor: "math_hf_data_processor" 
+  num_workers: 1 
+
+# 5. Reward Service
+env:
+  math:
+    reward_url: "http://go-reward-svc/verify" 
+    num_workers: 8 
+
+# 6. RL Engine
+loss_fn:
+  reference_policy_kl_penalty: 0.01
+  token_level_loss: true
+
+grpo:
+  num_generations_per_prompt: 2 
+  num_prompts_per_step: 16
+  adv_estimator:
+    name: "grpo"
+
+# 7. Policy & Generation
+policy:
+  model_name: "/tmp/qwen_local"
+  tokenizer:
+    name: "/tmp/qwen_local"
+  precision: "bfloat16"
+  dtensor_cfg:
+    enabled: true
+    tensor_parallel_size: 2
+  distributed_backend: "nccl" # Explicitly use NCCL for inter-node
+
+  generation:
+    backend: "vllm"
+    colocated:
+      enabled: true 
+    vllm_cfg:
+      tensor_parallel_size: 2
+      gpu_memory_utilization: 0.2 
+      enforce_eager: false
+
+# 8. Global Inference
+model:
+  generation:
+    backend: "vllm"
+    vllm_kwargs:
+      dtype: "bfloat16"
+      enforce_eager: false
+      gpu_memory_utilization: 0.2

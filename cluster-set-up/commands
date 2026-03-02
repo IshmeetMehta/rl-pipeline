@@ -1,0 +1,176 @@
+# # 1. Create the Cluster with GCS Fuse and Workload Identity
+# gcloud container clusters create nemo-rl-cluster \
+#     --region us-central1 \
+#     --workload-pool=${PROJECT_ID}.svc.id.goog \
+#     --addons GcsFuseCsiDriver
+
+# # 2. Create the GPU Pool (for Training) with DWS
+# gcloud container node-pools create "qwen-pool" \
+#     --cluster "nemo-rl-cluster" \
+#     --region "us-central1" \
+#     --node-locations "us-central1-a" \
+#     --machine-type "g2-standard-12" \
+#     --accelerator "type=nvidia-l4,count=1,gpu-driver-version=default" \
+#     --enable-autoscaling \
+#     --num-nodes 0 \
+#     --min-nodes 0 \
+#     --total-max-nodes 5 \
+#     --location-policy "ANY" \
+#     --enable-queued-provisioning \
+#     --reservation-affinity "none"
+
+# # GPU nodepool without DWS
+# gcloud container node-pools create "qwen-pool2" \
+#     --cluster "nemo-rl-cluster" \
+#     --region "us-central1" \
+#     --node-locations "us-central1-a" \
+#     --machine-type "g2-standard-12" \
+#     --accelerator "type=nvidia-l4,count=1,gpu-driver-version=default" \
+#     --enable-autoscaling \
+#     --num-nodes 2 \
+#     --min-nodes 0 \
+#     --total-max-nodes 5 \
+#     --location-policy "ANY" \
+#     --reservation-affinity "none"
+
+# # 3. Create the Sandbox Pool (for Reward Server)
+# gcloud container node-pools create sandbox-pool \
+#     --cluster nemo-rl-cluster --machine-type n2-standard-4 \
+#     --sandbox type=gvisor --num-nodes 1 --region us-central1
+
+# # 4. Install the kuberay operator
+
+# helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+# helm repo update
+# # Install both CRDs and KubeRay operator v1.5.1.
+# helm install kuberay-operator kuberay/kuberay-operator --version 1.5.1
+
+# # 5. Download model from hugging face and upload to GCS Storage bucket
+
+# export HF_TOKEN=""
+# curl -LsSf https://hf.co/cli/install.sh | bash
+# hf download Qwen/Qwen2.5-Coder-1.5B
+# gcloud storage cp -r /usr/local/google/home/ishmeetm/.cache/huggingface/hub gs://golang-sample-prompts-dataset/models
+
+# # 6. Run the training job
+
+# # 1. Identify the Head Pod
+# HEAD_POD=$(kubectl get pods -l ray.io/node-type=head -o name | head -n 1)
+
+# # 2. Execute the Job with Optimized Parallelism
+# kubectl exec -it $HEAD_POD -- \
+#     uv run python examples/run_grpo.py \
+#     --config examples/configs/grpo_math_1B.yaml \
+#     policy.model_name="Qwen/Qwen2.5-Coder-7B" \
+#     data.train_data_path="/mount/gcs/train.jsonl" \
+#     trainer.num_nodes=2 \
+#     trainer.devices=8 \
+#     trainer.precision="bf16" \
+#     policy.tensor_model_parallel_size=2 \
+#     policy.pipeline_model_parallel_size=1 \
+#     algorithm.num_rollouts=8 \
+#     algorithm.reward_fn.type="http" \
+#     algorithm.reward_fn.url="http://go-reward-svc/verify" \
+#     exp_manager.name="qwen-golang-rl" \
+#     checkpointing.checkpoint_dir="/mount/gcs/checkpoints/qwen-7b-grpo"
+
+
+# New RUNNNNN
+
+1. Create a cluster
+# Variables
+export CLUSTER_NAME=nemo-rl-ray
+export ZONE=us-central1-a
+export PROJECT_ID=$(gcloud config get-value project)
+
+# Create Cluster with a robust Head Node (16 vCPU, 64GB RAM)
+# Includes GCS Fuse CSI driver for your dataset mounting
+gcloud container clusters create $CLUSTER_NAME \
+    --zone $ZONE \
+    --machine-type n2-standard-16 \
+    --num-nodes 1 \
+    --addons GcsFuseCsiDriver,RayOperator \
+    --workload-pool=$PROJECT_ID.svc.id.goog \
+    --logging=SYSTEM,WORKLOAD \
+    --monitoring=SYSTEM
+
+2. Create Nodepool for ray head
+
+# Create the Head Node Pool with n2-standard-32 (32 vCPU, 128GB RAM)
+gcloud container node-pools create ray-head-pool \
+    --cluster $CLUSTER_NAME \
+    --zone $ZONE \
+    --machine-type n2-standard-32 \
+    --num-nodes 1 \
+    --node-labels="ray.io/node-type=head" \
+    --disk-size 200GB \
+    --disk-type pd-ssd \
+    --workload-metadata=GKE_METADATA \
+    --no-enable-private-nodes
+
+3. Create nodepool for workers
+
+# Create the Multi-GPU Worker Pool (2 GPUs per node, 2 nodes)
+gcloud container node-pools create gpu-multi-worker-pool \
+    --cluster $CLUSTER_NAME \
+    --zone $ZONE \
+    --machine-type g2-standard-24 \
+    --accelerator "type=nvidia-l4,count=2" \
+    --num-nodes 2 \
+    --enable-autoscaling --min-nodes 0 --max-nodes 4 \
+    --node-labels="ray.io/node-type=worker" \
+    --disk-size 200GB \
+    --metadata="install-nvidia-driver=true" \
+    --no-enable-private-nodes
+
+
+4. Create gvisor nodepool (reward server)
+
+gcloud container node-pools create sandbox \
+    --cluster=nemo-rl-ray \
+    --zone=us-central1-a \
+    --num-nodes=1 \
+    --machine-type=n2-standard-4 \
+    --image-type=cos_containerd \
+    --sandbox type=gvisor \
+    --no-enable-private-nodes
+
+5. Install the kuberay operator
+
+helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+helm repo update
+# Install both CRDs and KubeRay operator v1.5.1.
+helm install kuberay-operator kuberay/kuberay-operator --version 1.5.1
+
+# # 5. Download model from hugging face and upload to GCS Storage bucket
+
+# export HF_TOKEN=""
+# curl -LsSf https://hf.co/cli/install.sh | bash
+# hf download Qwen/Qwen2.5-Coder-1.5B
+# gcloud storage cp -r /usr/local/google/home/ishmeetm/.cache/huggingface/hub gs://golang-sample-prompts-dataset/models
+
+# # 6. Run the training job
+
+# 1. Identify the Head Pod
+HEAD_POD=$(kubectl get pods -l ray.io/node-type=head -o name | head -n 1)
+
+# 2. Execute the Job with Optimized Parallelism
+kubectl exec -it $HEAD_POD -- \
+    uv run python examples/run_grpo.py \
+    --config examples/configs/grpo_math_1B.yaml \
+    policy.model_name="Qwen/Qwen2.5-Coder-7B" \
+    data.train_data_path="/mount/gcs/train.jsonl" \
+    trainer.num_nodes=2 \
+    trainer.devices=8 \
+    trainer.precision="bf16" \
+    policy.tensor_model_parallel_size=2 \
+    policy.pipeline_model_parallel_size=1 \
+    algorithm.num_rollouts=8 \
+    algorithm.reward_fn.type="http" \
+    algorithm.reward_fn.url="http://go-reward-svc/verify" \
+    exp_manager.name="qwen-golang-rl" \
+    checkpointing.checkpoint_dir="/mount/gcs/checkpoints/qwen-7b-grpo"
+
+    ## Note : Check if you need to add tolerations in the ray workers and head nodes deployment yaml for nemo-rl
+
+

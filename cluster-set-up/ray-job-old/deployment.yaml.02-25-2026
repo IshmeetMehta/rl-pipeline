@@ -1,0 +1,108 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: nemo-rl-grpo-cluster
+  namespace: default
+spec:
+  rayVersion: '2.40.0'
+  
+  ##############################################################################
+  # HEAD NODE: Targeted to ray-head-pool
+  ##############################################################################
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      num-cpus: '0'
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+        labels:
+          ray.io/node-type: head
+      spec:
+        serviceAccountName: nemo-ksa
+        nodeSelector:
+          # FIX: Use the explicit pool name you created
+          cloud.google.com/gke-nodepool: ray-head-pool
+        containers:
+        - name: ray-head
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          resources:
+            limits:
+              cpu: "30"
+              memory: "115Gi"
+            requests:
+              cpu: "28"
+              memory: "110Gi"
+          volumeMounts:
+          - name: gcs-fuse-data
+            mountPath: /mount/gcs
+          - name: dshm
+            mountPath: /dev/shm
+        volumes:
+        - name: gcs-fuse-data
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: "golang-sample-prompts-dataset"
+              mountOptions: "implicit-dirs"
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "60Gi"
+
+  ##############################################################################
+  # WORKER NODES: Targeted to gpu-multi-worker-pool
+  ##############################################################################
+  workerGroupSpecs:
+  - groupName: dual-l4-workers
+    replicas: 2
+    minReplicas: 2
+    maxReplicas: 4
+    rayStartParams:
+      num-gpus: "2"
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+        labels:
+          ray.io/node-type: worker
+      spec:
+        serviceAccountName: nemo-ksa
+        nodeSelector:
+          # FIX: Explicitly target your GPU worker pool
+          cloud.google.com/gke-nodepool: gpu-multi-worker-pool
+          cloud.google.com/gke-accelerator: nvidia-l4
+        # FIX: Add tolerations so workers can land on tainted GPU nodes
+        tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        containers:
+        - name: ray-worker
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          resources:
+            limits:
+              nvidia.com/gpu: 2
+              cpu: "22"
+              memory: "88Gi"
+            requests:
+              nvidia.com/gpu: 2
+              cpu: "20"
+              memory: "80Gi"
+          volumeMounts:
+          - name: gcs-fuse-data
+            mountPath: /mount/gcs
+          - name: dshm
+            mountPath: /dev/shm
+        volumes:
+        - name: gcs-fuse-data
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: "golang-sample-prompts-dataset"
+              mountOptions: "implicit-dirs"
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "40Gi"

@@ -1,0 +1,20 @@
+trainer:
+  devices: 8
+  num_nodes: 2
+  precision: bf16
+
+model:
+  name: "Qwen/Qwen2.5-Coder-7B"
+  tensor_model_parallel_size: 1
+
+exp_manager:
+  name: "qwen-golang-rl"
+  create_checkpoint_callback: True
+
+# The RL Strategy
+algorithm:
+  name: grpo
+  num_rollouts: 8  # Generate 8 Go snippets per prompt
+  reward_fn:
+    type: "http"
+    url: "http://go-reward-svc/verify"

@@ -1,0 +1,63 @@
+
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: nemo-rl-ray
+spec:
+  rayVersion: '2.40.0'
+  headGroupSpec:
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+      spec:
+        serviceAccountName: nemo-ksa
+        containers:
+        - name: ray-head
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          volumeMounts:
+          - name: gcs-fuse-data
+            mountPath: /mount/gcs
+        volumes:
+        - name: gcs-fuse-data
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: "golang-sample-prompts-dataset"
+              # Added permissions flags to fix Errno 13
+              mountOptions: "implicit-dirs,file-mode=777,dir-mode=777"
+
+  workerGroupSpecs:
+  - groupName: gpu-group
+    replicas: 2
+    template:
+      metadata:
+        annotations:
+          gke-gcsfuse/volumes: "true"
+      spec:
+        serviceAccountName: nemo-ksa
+        # --- ADDED: TOLERATIONS TO ALLOW GPU SCHEDULING ---
+        tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+        containers:
+        - name: ray-worker
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          # --- ADDED: RESOURCE LIMITS SO RAY SEES THE GPU ---
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+            requests:
+              nvidia.com/gpu: 1
+          volumeMounts:
+          - name: gcs-fuse-data
+            mountPath: /mount/gcs
+        volumes:
+        - name: gcs-fuse-data
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: "golang-sample-prompts-dataset"
+              mountOptions: "implicit-dirs,file-mode=777,dir-mode=777"

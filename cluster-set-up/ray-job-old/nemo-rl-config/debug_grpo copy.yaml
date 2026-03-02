@@ -1,0 +1,108 @@
+# ==============================================================================
+# NeMo RL GRPO - FINAL PRODUCTION CONFIG (Validation Disabled)
+# ==============================================================================
+
+# 1. Experiments & Tracking
+logger:
+  log_dir: /mount/gcs/logs/nemo_grpo_golang_final
+  num_val_samples_to_print: 0 # Reduced to 0
+  tensorboard_enabled: true
+  monitor_gpus: true
+
+# 2. Weights & Metrics
+checkpointing:
+  enabled: true
+  save_period: 50
+  checkpoint_dir: checkpoints
+  metric_name: "train:reward" # Changed from val:reward
+  keep_top_k: 3
+  higher_is_better: true
+
+# 3. Infrastructure
+cluster:
+  num_nodes: 2
+  gpus_per_node: 2
+
+trainer:
+  precision: bf16-mixed
+  devices: 2
+  num_nodes: 2
+  strategy: ddpp
+  max_steps: 2000
+
+# 4. Dataset & Processor
+data:
+  env_name: "math"
+  processor: "math_hf_data_processor"
+  dataset_name: "ResponseDataset"
+  train_data_path: "/mount/gcs/dataset/train.jsonl"
+  prompt_file: null
+  system_prompt_file: null
+  max_input_seq_length: 2048
+  shuffle: true
+  num_workers: 1
+
+  train:
+    data_path: "/mount/gcs/dataset/train.jsonl"
+    input_key: "input"
+    split_validation_size: 0.0 # DISABLED: Use 100% for training
+    seed: ${grpo.seed} 
+  
+  # Keep as null to satisfy the internal script variable check
+  validation: null
+
+  default:
+    dataset_name: "ResponseDataset"
+    input_key: "input"
+    output_key: "output"
+    extra_env_info_key: "extra_env_info"
+    processor: "math_hf_data_processor"
+    env_name: "math"
+
+# 5. Remote Reward Service
+env:
+  math: 
+    reward_url: "http://go-reward-svc/verify" 
+    num_workers: 16 
+
+# 6. RL Engine Parameters (GRPO)
+grpo:
+  seed: 42
+  num_generations_per_prompt: 4 
+  num_prompts_per_step: 8
+  val_period: 0               # DISABLED: Set to 0 to skip validation loops
+  val_at_start: false         # DISABLED: Skip baseline validation
+  val_at_end: false           # DISABLED
+  max_val_samples: 0          # DISABLED
+  val_batch_size: 1           
+  adv_estimator:
+    name: "grpo"
+
+# 7. Policy & Generation
+policy:
+  model_name: "Qwen/Qwen2.5-1.5B-Instruct" 
+  tokenizer:
+    name: "Qwen/Qwen2.5-1.5B-Instruct"
+  precision: "bfloat16"
+  max_total_sequence_length: 4096 
+  train_micro_batch_size: 2 
+  train_global_batch_size: 16
+  generation:
+    backend: "vllm"
+    prompt_template: "<|im_start|>system\nYou are a senior Go developer. Write functional Go code.<|im_end|>\n<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n"
+    vllm_cfg: 
+      gpu_memory_utilization: 0.3
+      env_vars: 
+        NCCL_SOCKET_IFNAME: "eth0"
+        NCCL_IB_DISABLE: "1"
+        HF_HOME: "/mount/gcs/.cache/huggingface"
+
+# 8. Global Inference Backend
+model:
+  generation:
+    backend: "vllm"
+    vllm_kwargs:
+      dtype: "bfloat16"
+      gpu_memory_utilization: 0.3
+    max_new_tokens: 1024
+    temperature: 0.7

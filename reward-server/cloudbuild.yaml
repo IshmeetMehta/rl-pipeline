@@ -1,0 +1,23 @@
+# images:
+#   - "us-central1-docker.pkg.dev/my-project-4-386519/train-artifacts/train-job:v1"
+# options:
+#   logging: CLOUD_LOGGING_ONLY
+# steps:
+#   - name: "gcr.io/cloud-builders/docker"
+#     args:
+#       - build
+#       - -t
+#       - "us-central1-docker.pkg.dev/my-project-4-386519/train-artifacts/train-job:v1"
+#       - "."
+images:
+  - ${_DESTINATION}
+options:
+  logging: CLOUD_LOGGING_ONLY
+serviceAccount:
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - -t
+      - ${_DESTINATION}
+      - .
