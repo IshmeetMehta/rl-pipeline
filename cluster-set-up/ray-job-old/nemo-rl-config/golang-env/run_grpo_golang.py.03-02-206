@@ -1,0 +1,212 @@
+import argparse
+import os
+import re
+import ray
+import torch
+import requests
+from typing import Any, Dict, Optional, List, Tuple
+from omegaconf import OmegaConf
+
+# NeMo RL Core Imports
+from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
+from nemo_rl.algorithms.utils import get_tokenizer
+from nemo_rl.data.datasets import AllTaskProcessedDataset, load_response_dataset
+from nemo_rl.data.interfaces import DatumSpec, TaskDataSpec, LLMMessageLogType
+from nemo_rl.data.processors import register_processor, TokenizerType
+from nemo_rl.distributed.virtual_cluster import init_ray
+from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
+from nemo_rl.models.generation import configure_generation_config
+from nemo_rl.utils.config import load_config, parse_hydra_overrides
+from nemo_rl.utils.logger import get_next_experiment_dir
+
+# ==============================================================================
+# 1. CUSTOM GOLANG DATA PROCESSOR
+# ==============================================================================
+
+def golang_processor(
+    datum_dict: Dict[str, Any],
+    task_data_spec: TaskDataSpec,
+    tokenizer: TokenizerType,
+    max_seq_length: int,
+    idx: int,
+) -> DatumSpec:
+    """Corrected v0.5.0 processor for Go coding tasks."""
+    problem = datum_dict["input"]
+    # Pass test_code to the environment via metadata
+    extra_env_info = {"test_code": datum_dict.get("extra_env_info", {}).get("test_code", "")}
+
+    message_log: LLMMessageLogType = []
+
+    # Handle System Prompt
+    if task_data_spec.system_prompt:
+        sys_formatted = tokenizer.apply_chat_template(
+            [{"role": "system", "content": task_data_spec.system_prompt}],
+            tokenize=False,
+            add_generation_prompt=False,
+            add_special_tokens=False,
+        )
+        sys_msg = {
+            "role": "system", 
+            "content": sys_formatted,
+            "token_ids": tokenizer(sys_formatted, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+        }
+        message_log.append(sys_msg)
+
+    # Handle User Prompt
+    user_content = task_data_spec.prompt.format(problem) if task_data_spec.prompt else problem
+    user_formatted = tokenizer.apply_chat_template(
+        [{"role": "user", "content": user_content}],
+        tokenize=False,
+        add_generation_prompt=True,
+        add_special_tokens=False,
+    )
+    user_msg = {
+        "role": "user", 
+        "content": user_formatted,
+        "token_ids": tokenizer(user_formatted, return_tensors="pt", add_special_tokens=False)["input_ids"][0]
+    }
+    message_log.append(user_msg)
+
+    length = sum(len(m["token_ids"]) for m in message_log)
+    loss_multiplier = 1.0 if length <= max_seq_length else 0.0
+
+    return {
+        "message_log": message_log,
+        "length": length,
+        "extra_env_info": extra_env_info,
+        "loss_multiplier": loss_multiplier,
+        "idx": idx,
+        "task_name": datum_dict.get("task_name", "go_verify_task")
+    }
+
+# Register the processor globally
+register_processor("golang_processor", golang_processor)
+
+# ==============================================================================
+# 2. CUSTOM GOLANG ENVIRONMENT (Synced with v0.5.0 Requirements)
+# ==============================================================================
+
+@ray.remote(max_restarts=-1, max_task_retries=-1)
+class GolangRemoteEnv(EnvironmentInterface):
+    """Ray Actor that communicates with the external FastAPI Go Reward Server."""
+    def __init__(self, config):
+        self.base_url = config.get("base_urls")[0]
+
+    def shutdown(self) -> None:
+        pass
+
+    async def step(
+        self, 
+        message_log_batch: List[LLMMessageLogType], 
+        metadata: List[Dict[str, Any]]
+    ) -> EnvironmentReturn:
+        results = []
+        for i, log in enumerate(message_log_batch):
+            # Extract assistant's code (joining all assistant turns)
+            raw_response = "".join([m["content"] for m in log if m["role"] == "assistant"])
+            
+            # Retrieve test_code from metadata
+            # v0.5.0 metadata access usually comes through the env_info_batch/metadata list
+            test_info = metadata[i].get("extra_env_info", {})
+            
+            try:
+                payload = {"response": raw_response, "extra_env_info": test_info}
+                # Support the URL logic from the user prompt: append /verify to base
+                url = f"{self.base_url.rstrip('/')}/verify"
+                response = requests.post(url, json=payload, timeout=30)
+                reward = float(response.json().get("reward", 0.0))
+                
+                if i == 0:
+                    print(f"[REWARD DEBUG] Score: {reward}")
+            except Exception as e:
+                print(f"[ENV ERROR] {e}")
+                reward = 0.0
+            
+            results.append(reward)
+            
+        rewards = torch.tensor(results).cpu()
+        done = torch.ones_like(rewards).cpu()
+        
+        # FIX: Added 'answers' argument (required by v0.5.0 EnvironmentReturn signature)
+        return EnvironmentReturn(
+            observations=[{"role": "environment", "content": ""}] * len(results),
+            metadata=metadata,
+            next_stop_strings=[None] * len(results),
+            rewards=rewards,
+            terminateds=done,
+            answers=[None] * len(results) 
+        )
+
+    def global_post_process_and_metrics(self, batch):
+        metrics = {"accuracy": batch["rewards"].mean().item()}
+        return batch, metrics
+
+    def collect_rollout_metrics(self, message_log_batch, env_return):
+        return {}
+
+# ==============================================================================
+# 3. MAIN SCRIPT LOGIC
+# ==============================================================================
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args, overrides = parser.parse_known_args()
+
+    # Load configuration
+    config = load_config(args.config)
+    clean_overrides = [o for o in overrides if not o.startswith('-')]
+    if clean_overrides:
+        config = parse_hydra_overrides(config, clean_overrides)
+    
+    config: MasterConfig = OmegaConf.to_container(config, resolve=True)
+
+    # 1. Initialize Ray First
+    init_ray()
+    
+    # 2. Setup Tokenizer & Global Configs
+    config["logger"]["log_dir"] = get_next_experiment_dir(config["logger"]["log_dir"])
+    tokenizer = get_tokenizer(config["policy"]["tokenizer"])
+    
+    # Patch stop tokens for v0.5.0 internal validation
+    gen_cfg = config["policy"]["generation"]
+    for key in ["stop_token_ids", "stop_strings"]:
+        if key not in gen_cfg:
+            gen_cfg[key] = None if key == "stop_strings" else []
+    config["policy"]["generation"] = configure_generation_config(gen_cfg, tokenizer)
+
+    # 3. Initialize Data
+    print("▶ Setting up Data & Task Mapping...")
+    data_info = load_response_dataset(config["data"], config["grpo"]["seed"])
+    task_processors = {data_info.task_name: (data_info.task_spec, data_info.processor)}
+    
+    dataset = AllTaskProcessedDataset(
+        data_info.formatted_ds["train"], tokenizer, data_info.task_spec,
+        task_processors, max_seq_length=config["data"]["max_input_seq_length"]
+    )
+    
+    # 4. DIRECT ACTOR INSTANTIATION
+    # Bypasses the NeMo factory to avoid Hydra registry lookup errors
+    target_env_name = config["data"]["env_name"] 
+    env_cfg = config["env"][target_env_name]
+    
+    print(f"▶ Creating Ray Actor Directly for: {target_env_name}")
+    env = GolangRemoteEnv.remote(env_cfg) 
+    
+    # Map the dataset task name to our live actor instance
+    task_to_env = {data_info.task_name: env}
+
+    # 5. Distributed Algorithm Setup
+    (
+        policy, policy_gen, cluster, dl, val_dl,
+        loss_fn, logger, ckpt, state, m_cfg
+    ) = setup(config, tokenizer, dataset, None)
+
+    print("🚀 ALL SYSTEMS READY. STARTING GRPO TRAINING.")
+    grpo_train(
+        policy, policy_gen, dl, None, tokenizer, 
+        loss_fn, task_to_env, task_to_env, logger, ckpt, state, m_cfg
+    )
+
+if __name__ == "__main__":
+    main()

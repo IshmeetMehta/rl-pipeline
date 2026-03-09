@@ -48,16 +48,18 @@ class VerificationResponse(BaseModel):
 def clean_code(text: str, target_package: str = "main") -> str:
     """
     Robust code extraction and package normalization.
+    Handles multi-block responses, comments before packages, and redeclarations.
     """
     if not text:
         return ""
-        
-    # FIX: Sanitize LLM non-breaking spaces that crash the Go compiler
-    text = text.replace('\xa0', ' ')
 
+    # 1. Robust Multi-Block Markdown Extraction
     backticks = "`" * 3
     pattern = backticks + r"(?:go)?\n?(.*?)" + backticks
     
+    # EDGE CASE FIX 1: The Multi-Block Split
+    # LLMs sometimes split code into multiple markdown blocks (e.g., helper structs in block 1, main logic in block 2).
+    # findall() captures EVERY Go block and concatenates them, preventing missing dependencies.
     matches = re.findall(pattern, text, re.DOTALL)
     if matches:
         code = "\n\n".join([m.strip() for m in matches])
@@ -67,11 +69,19 @@ def clean_code(text: str, target_package: str = "main") -> str:
     if not code:
         return ""
 
-    # Prevent Redeclaration & Import Errors
+    # 2. Prevent Redeclaration & Import Errors
+    # EDGE CASE FIX 2: Comments Before Package Declarations
+    # LLMs often write "// Here is the code \n package main".
+    # (?m) enables multiline mode so ^ matches the start of any line, allowing us to strip the
+    # package declaration even if it's not the absolute first character in the string.
     code = re.sub(r"(?m)^\s*package\s+\w+.*$", "", code).strip()
+    
+    # Rename 'func main()' instead of removing it.
+    # Removing it leaves dangling imports (like "fmt") causing "imported and not used".
     code = re.sub(r'\bfunc\s+main\s*\(\s*\)', 'func _llm_unused_main()', code).strip()
 
-    # Final Assembly
+    # 3. Final Assembly
+    # Re-insert a standardized package header and add a dummy main.
     return f"package {target_package}\n\n{code}\n\n// Dummy main to satisfy 'go build' entry point requirement\nfunc main() {{}}\n"
 
 async def run_command(command: list, cwd: Path, timeout: int = 15) -> Tuple[int, str, str, float]:
@@ -81,6 +91,11 @@ async def run_command(command: list, cwd: Path, timeout: int = 15) -> Tuple[int,
     start_time = time.time()
     process = None
     
+    # EDGE CASE FIX 4: Hallucinated Imports Hanging the Server
+    # If the LLM hallucinates a fake third-party library (e.g., github.com/fake/lib),
+    # `go build` will hang trying to download it from the internet.
+    # GOPROXY="off" disables network downloads, restricting the model to the standard library
+    # and ensuring fast, secure compilation failures for invalid imports.
     custom_env = os.environ.copy()
     custom_env["GOPROXY"] = "off"
     custom_env["CGO_ENABLED"] = "0"
@@ -89,7 +104,7 @@ async def run_command(command: list, cwd: Path, timeout: int = 15) -> Tuple[int,
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=str(cwd),
-            env=custom_env,
+            env=custom_env,  # Apply isolated environment
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -154,12 +169,18 @@ async def verify_code(payload: VerificationRequest):
     work_dir.mkdir(parents=True, exist_ok=True)
     
     try:
+        # File Preparation
         (work_dir / "main.go").write_text(code)
         
         if test_code:
+            # EDGE CASE FIX 3: Test File Visibility Mismatch
+            # If the dataset's test_code uses `package test`, it won't be able to access the unexported
+            # functions (like Fibonacci) in the model's `package main` code.
+            # We forcefully strip the dataset's package declaration and enforce 'package main' to guarantee visibility.
             test_code = re.sub(r"(?m)^\s*package\s+\w+.*$", "", test_code).strip()
             (work_dir / "main_test.go").write_text(f"package main\n\n{test_code}")
 
+        # A. Module Setup
         await run_command(["go", "mod", "init", f"verify/job_{job_id}"], cwd=work_dir)
         
         # B. Compilation Phase
@@ -168,32 +189,6 @@ async def verify_code(payload: VerificationRequest):
         
         if exit_code != 0:
             error_msg = (stderr or stdout).strip()
-            
-            # --- EDGE CASE FIX 5: SELF-HEALING COMPILER LOOP ---
-            # Dynamically extract missing packages from the compiler error and inject them.
-            missing = set(re.findall(r"undefined:\s+([a-zA-Z0-9_]+)", error_msg))
-            unused = set(re.findall(r'imported and not used:\s+"([^"]+)"', error_msg))
-            
-            if missing or unused:
-                logger.info(f"[JOB {job_id}] Auto-healing imports: +{list(missing)} -{list(unused)}. Retrying build...")
-                
-                # Inject missing imports directly as extracted from the error
-                if missing:
-                    import_block = "import (\n" + "\n".join([f'\t"{pkg}"' for pkg in missing]) + "\n)\n"
-                    code = code.replace("package main", f"package main\n\n{import_block}", 1)
-                
-                # Comment out unused imports (both standalone and grouped blocks)
-                for pkg in unused:
-                    code = re.sub(rf'import\s+"{pkg}"', f'// import "{pkg}" removed', code)
-                    code = re.sub(rf'(?m)^\s*"{pkg}"\s*$', f'// "{pkg}" removed', code)
-                    
-                # Re-write and Re-compile
-                (work_dir / "main.go").write_text(code)
-                exit_code, stdout, stderr, build_time2 = await run_command(["go", "build", "."], cwd=work_dir)
-                build_time += build_time2
-                error_msg = (stderr or stdout).strip()
-
-        if exit_code != 0:
             short_err = error_msg[:250].replace('\n', ' ')
             logger.info(f"[JOB {job_id}] REWARD: 0.1 | REASON: Compilation Failed | ERR: {short_err} | TIME: {build_time:.2f}s")
             return VerificationResponse(

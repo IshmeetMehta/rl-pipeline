@@ -1,0 +1,164 @@
+import os
+import re
+import uuid
+import logging
+import asyncio
+import shutil
+import uvicorn
+from fastapi import FastAPI, Body
+
+# ==============================================================================
+# 1. PRODUCTION CONFIGURATION & LOGGING
+# ==============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("go-reward-server")
+
+app = FastAPI(title="Production Go Reward Server")
+
+# ==============================================================================
+# 2. UTILITY FUNCTIONS (Cleaning & Execution)
+# ==============================================================================
+
+def clean_code(text: str) -> str:
+    """
+    Strips Markdown backticks and removes conflicting func main().
+    This ensures that model-provided scripts don't conflict with our test runner.
+    """
+    if not text:
+        return ""
+
+    # Strip Markdown Code Blocks
+    if "```go" in text:
+        text = text.split("```go")[1].split("```")[0]
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0]
+    
+    code = text.strip()
+    
+    # ANTI-REDECLARATION: Identify and remove func main() { ... }
+    # This prevents the "-1.0 Reward" issue caused by conflicting entry points
+    # if the model provides a full standalone script.
+    # The regex matches the function declaration and its immediate block.
+    code = re.sub(r'func\s+main\s*\(\s*\)\s*\{[\s\S]*?\}', '', code)
+    
+    # Ensure a package declaration exists (Default to main if missing)
+    if code and "package " not in code:
+        code = "package main\n\n" + code
+        
+    return code.strip()
+
+async def run_command(command, cwd, timeout=10):
+    """
+    ASYNCHRONOUS EXECUTION ENGINE with a built-in WATCHDOG TIMER.
+    Prevents infinite loops or hung processes from blocking the server.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            # Watchdog: Kill process if it exceeds the timeout
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            return process.returncode, stdout.decode(), stderr.decode()
+        except asyncio.TimeoutExpired:
+            try:
+                process.kill()
+            except:
+                pass
+            await process.wait()
+            return 124, "", "Execution Timeout (Watchdog Killed Process)"
+    except Exception as e:
+        return 1, "", str(e)
+
+# ==============================================================================
+# 3. VERIFICATION ENDPOINT
+# ==============================================================================
+
+@app.post("/verify")
+async def verify_code(payload: dict = Body(...)):
+    """
+    Main verification endpoint.
+    Processes Go code in a sandboxed, unique environment with Tiered Rewards.
+    """
+    raw_response = payload.get("response", "")
+    extra_info = payload.get("extra_env_info", {})
+    test_code = extra_info.get("test_code", "")
+    
+    logger.info(f"Verification Request: Received payload (Response Length: {len(raw_response)})")
+
+    # Clean the code logic
+    code = clean_code(raw_response)
+    
+    if not code:
+        logger.warning("Rejected: Empty code block.")
+        return {"reward": 0.0, "log": "Empty or invalid code format"}
+
+    # SANDBOX ISOLATION: Unique UUID-based directory
+    job_id = str(uuid.uuid4())
+    work_dir = f"/tmp/go_job_{job_id}"
+    os.makedirs(work_dir, exist_ok=True)
+    
+    try:
+        # Write files to sandbox
+        with open(os.path.join(work_dir, "main.go"), "w") as f:
+            f.write(code)
+            
+        if test_code:
+            # Ensure test code has a package declaration compatible with main.go
+            if "package " not in test_code:
+                test_code = "package main\n\n" + test_code
+            with open(os.path.join(work_dir, "main_test.go"), "w") as f:
+                f.write(test_code)
+
+        # AUTOMATIC MODULE MANAGEMENT: Initialize the sandbox as a Go module
+        await run_command(["go", "mod", "init", f"verify/job_{job_id[:8]}"], cwd=work_dir)
+        
+        # TIERED REWARD LOGIC - Step 1: Compilation Check
+        exit_code, stdout, stderr = await run_command(["go", "build", "."], cwd=work_dir)
+        if exit_code != 0:
+            logger.info(f"Job {job_id}: Compilation Failed")
+            return {
+                "reward": 0.1, 
+                "log": f"Compilation Error: {stderr or stdout}"
+            }
+
+        # TIERED REWARD LOGIC - Step 2: Testing / Execution
+        # Uses the watchdog-protected command runner
+        test_exit_code, test_stdout, test_stderr = await run_command(["go", "test", "-v", "."], cwd=work_dir)
+        
+        if test_exit_code == 0:
+            logger.info(f"Job {job_id}: Success (Reward 1.0)")
+            return {"reward": 1.0, "log": "Success: All tests passed"}
+        elif test_exit_code == 124:
+            # Handle infinite loops identified by the watchdog
+            logger.info(f"Job {job_id}: Watchdog Timeout (0.0 Reward)")
+            return {"reward": 0.0, "log": "Failure: Execution timeout (possible infinite loop)"}
+        else:
+            # Handle logic errors where graduation is possible but tests failed
+            logger.info(f"Job {job_id}: Logic Error (Reward 0.3)")
+            return {
+                "reward": 0.3, 
+                "log": f"Logic Error: Test failures detected\n{test_stdout}\n{test_stderr}"
+            }
+
+    except Exception as e:
+        logger.error(f"Internal Processing Error: {str(e)}")
+        return {"reward": 0.0, "log": f"Internal system error: {str(e)}"}
+
+    finally:
+        # SANDBOX CLEANUP
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+# ==============================================================================
+# 4. SERVER RUNNER
+# ==============================================================================
+
+if __name__ == "__main__":
+    # Listening on 0.0.0.0 is mandatory for cluster/pod communication
+    uvicorn.run(app, host="0.0.0.0", port=8000)

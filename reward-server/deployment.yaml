@@ -32,6 +32,10 @@ spec:
       containers:
       - name: reward-server
         image: us-central1-docker.pkg.dev/my-project-4-386519/rl-pipeline/reward-server:v1
+        # Forces Kubernetes to pull the latest version of :v1 every time
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
         resources:
           requests:
             cpu: "500m"

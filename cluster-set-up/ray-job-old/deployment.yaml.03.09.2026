@@ -47,9 +47,7 @@ spec:
           csi:
             driver: gcsfuse.csi.storage.gke.io
             volumeAttributes:
-              # --- 1. POINT TO NEW HNS BUCKET ---
-              bucketName: "dataset-golang-exp" 
-              # --- 2. APPLY AI/ML PERFORMANCE CACHING FLAGS ---
+              bucketName: "golang-sample-prompts-dataset"
               mountOptions: "implicit-dirs"
         - name: dshm
           emptyDir:
@@ -116,9 +114,7 @@ spec:
           csi:
             driver: gcsfuse.csi.storage.gke.io
             volumeAttributes:
-              # --- 1. POINT TO NEW HNS BUCKET ---
-              bucketName: "dataset-golang-exp"
-              # --- 2. APPLY AI/ML PERFORMANCE CACHING FLAGS ---
+              bucketName: "golang-sample-prompts-dataset"
               mountOptions: "implicit-dirs"
         - name: dshm
           emptyDir:

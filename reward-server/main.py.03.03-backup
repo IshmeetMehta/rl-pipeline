@@ -5,7 +5,6 @@ import asyncio
 import shutil
 import uvicorn
 import time
-import os
 from pathlib import Path
 from typing import Tuple, Dict, Any
 from fastapi import FastAPI, Body
@@ -48,54 +47,57 @@ class VerificationResponse(BaseModel):
 def clean_code(text: str, target_package: str = "main") -> str:
     """
     Robust code extraction and package normalization.
+    Ensures model-provided scripts don't conflict with our test runner.
     """
     if not text:
         return ""
-        
-    # FIX: Sanitize LLM non-breaking spaces that crash the Go compiler
-    text = text.replace('\xa0', ' ')
 
+    # 1. Robust Markdown Extraction
+    # We construct the backticks programmatically to prevent UI truncation
     backticks = "`" * 3
     pattern = backticks + r"(?:go)?\n?(.*?)" + backticks
     
-    matches = re.findall(pattern, text, re.DOTALL)
-    if matches:
-        code = "\n\n".join([m.strip() for m in matches])
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        code = match.group(1).strip()
     else:
         code = text.strip()
 
     if not code:
         return ""
 
-    # Prevent Redeclaration & Import Errors
-    code = re.sub(r"(?m)^\s*package\s+\w+.*$", "", code).strip()
-    code = re.sub(r'\bfunc\s+main\s*\(\s*\)', 'func _llm_unused_main()', code).strip()
+    # 2. Prevent Redeclaration Errors
+    # Strip existing package declaration at the start of the string
+    code = re.sub(r"^\s*package\s+\w+", "", code, count=1).strip()
+    
+    # Remove 'func main()' block
+    # [\s\S]*? handles multi-line function bodies reliably.
+    code = re.sub(r'func\s+main\s*\(\s*\)\s*\{[\s\S]*?\}', '', code).strip()
 
-    # Final Assembly
-    return f"package {target_package}\n\n{code}\n\n// Dummy main to satisfy 'go build' entry point requirement\nfunc main() {{}}\n"
+    # 3. Final Assembly
+    # Re-insert a standardized package header to ensure namespace visibility for tests
+    return f"package {target_package}\n\n{code}"
 
 async def run_command(command: list, cwd: Path, timeout: int = 15) -> Tuple[int, str, str, float]:
     """
-    Asynchronous execution engine with precise watchdog timer and isolated network.
+    Asynchronous execution engine with a precise watchdog timer.
+    Includes decoding safety (errors='replace') and graceful process termination.
+    Returns (exit_code, stdout, stderr, elapsed_time).
     """
     start_time = time.time()
     process = None
-    
-    custom_env = os.environ.copy()
-    custom_env["GOPROXY"] = "off"
-    custom_env["CGO_ENABLED"] = "0"
-
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=str(cwd),
-            env=custom_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         try:
+            # wait_for raises asyncio.TimeoutError when the process hangs
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             elapsed = time.time() - start_time
+            # Safety: replace non-UTF-8 characters to prevent crashes on binary/noisy logs
             return (
                 process.returncode or 0, 
                 stdout.decode('utf-8', errors='replace').strip(), 
@@ -103,6 +105,7 @@ async def run_command(command: list, cwd: Path, timeout: int = 15) -> Tuple[int,
                 elapsed
             )
         except asyncio.TimeoutError:
+            # Graceful shutdown sequence during timeout to avoid zombie processes
             try:
                 if process:
                     process.terminate()
@@ -112,6 +115,9 @@ async def run_command(command: list, cwd: Path, timeout: int = 15) -> Tuple[int,
             except Exception:
                 pass
             
+            # CRITICAL FIX FOR FD LEAKS (Errno 24):
+            # When wait_for times out, the communicate() task is cancelled, leaving pipes open.
+            # We MUST call communicate() again after killing the process to drain pipes and close FDs!
             if process:
                 await process.communicate()
                 
@@ -130,7 +136,8 @@ async def run_command(command: list, cwd: Path, timeout: int = 15) -> Tuple[int,
 async def verify_code(payload: VerificationRequest):
     """
     Main verification endpoint.
-    Processes Go code in a sandboxed, unique environment with Tiered Rewards.
+    Processes Go code in a sandboxed, unique environment with Tiered Rewards and 
+    precise performance tracking.
     """
     full_start_time = time.time()
     job_id = str(uuid.uuid4())[:8]
@@ -154,12 +161,14 @@ async def verify_code(payload: VerificationRequest):
     work_dir.mkdir(parents=True, exist_ok=True)
     
     try:
+        # File Preparation
         (work_dir / "main.go").write_text(code)
-        
         if test_code:
-            test_code = re.sub(r"(?m)^\s*package\s+\w+.*$", "", test_code).strip()
-            (work_dir / "main_test.go").write_text(f"package main\n\n{test_code}")
+            if "package " not in test_code:
+                test_code = "package main\n\n" + test_code
+            (work_dir / "main_test.go").write_text(test_code)
 
+        # A. Module Setup
         await run_command(["go", "mod", "init", f"verify/job_{job_id}"], cwd=work_dir)
         
         # B. Compilation Phase
@@ -167,38 +176,10 @@ async def verify_code(payload: VerificationRequest):
         exit_code, stdout, stderr, build_time = await run_command(["go", "build", "."], cwd=work_dir)
         
         if exit_code != 0:
-            error_msg = (stderr or stdout).strip()
-            
-            # --- EDGE CASE FIX 5: SELF-HEALING COMPILER LOOP ---
-            # Dynamically extract missing packages from the compiler error and inject them.
-            missing = set(re.findall(r"undefined:\s+([a-zA-Z0-9_]+)", error_msg))
-            unused = set(re.findall(r'imported and not used:\s+"([^"]+)"', error_msg))
-            
-            if missing or unused:
-                logger.info(f"[JOB {job_id}] Auto-healing imports: +{list(missing)} -{list(unused)}. Retrying build...")
-                
-                # Inject missing imports directly as extracted from the error
-                if missing:
-                    import_block = "import (\n" + "\n".join([f'\t"{pkg}"' for pkg in missing]) + "\n)\n"
-                    code = code.replace("package main", f"package main\n\n{import_block}", 1)
-                
-                # Comment out unused imports (both standalone and grouped blocks)
-                for pkg in unused:
-                    code = re.sub(rf'import\s+"{pkg}"', f'// import "{pkg}" removed', code)
-                    code = re.sub(rf'(?m)^\s*"{pkg}"\s*$', f'// "{pkg}" removed', code)
-                    
-                # Re-write and Re-compile
-                (work_dir / "main.go").write_text(code)
-                exit_code, stdout, stderr, build_time2 = await run_command(["go", "build", "."], cwd=work_dir)
-                build_time += build_time2
-                error_msg = (stderr or stdout).strip()
-
-        if exit_code != 0:
-            short_err = error_msg[:250].replace('\n', ' ')
-            logger.info(f"[JOB {job_id}] REWARD: 0.1 | REASON: Compilation Failed | ERR: {short_err} | TIME: {build_time:.2f}s")
+            logger.info(f"[JOB {job_id}] REWARD: 0.1 | REASON: Compilation Failed | TIME: {build_time:.2f}s")
             return VerificationResponse(
                 reward=0.1, 
-                log=f"Compilation Error: {error_msg}",
+                log=f"Compilation Error: {stderr or stdout}",
                 metrics={"build_time": build_time, "total_time": time.time() - full_start_time}
             )
 
@@ -243,4 +224,5 @@ async def verify_code(payload: VerificationRequest):
 # ==============================================================================
 
 if __name__ == "__main__":
+    # Host 0.0.0.0 is mandatory for Kubernetes pods and Docker communication
     uvicorn.run(app, host="0.0.0.0", port=8000)

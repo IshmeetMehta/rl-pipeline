@@ -51,9 +51,6 @@ def clean_code(text: str, target_package: str = "main") -> str:
     """
     if not text:
         return ""
-        
-    # FIX: Sanitize LLM non-breaking spaces that crash the Go compiler
-    text = text.replace('\xa0', ' ')
 
     backticks = "`" * 3
     pattern = backticks + r"(?:go)?\n?(.*?)" + backticks
