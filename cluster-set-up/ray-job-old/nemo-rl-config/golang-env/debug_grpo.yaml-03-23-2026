@@ -44,31 +44,30 @@ trainer:
   precision: bf16-mixed
   devices: 2
   num_nodes: 2
-  strategy: ddp
+  strategy: ddpp
   accelerator: gpu
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
   max_steps: 2000
-  max_epochs: 10000            # FIXED: Forces PyTorch Lightning to loop the dataset continuously
   accumulate_grad_batches: 1
 
 data:
   env_name: "go_verify_task"
   processor: "golang_processor"      
   dataset_name: "ResponseDataset"
-  train_data_path: "/mount/gcs/datasets/golang_prompts.jsonl"
+  train_data_path: "/mount/gcs/dataset/train.jsonl"
   max_input_seq_length: 2048
   shuffle: true
   num_workers: 1
 
   train:
-    - data_path: "/mount/gcs/datasets/golang_prompts.jsonl"
+    - data_path: "/mount/gcs/dataset/train.jsonl"
       dataset_name: "ResponseDataset"
       input_key: "input"
       env_name: "go_verify_task"
   
   validation:
-    - data_path: "/mount/gcs/datasets/golang_val.jsonl"
+    - data_path: "/mount/gcs/dataset/val.jsonl"
       dataset_name: "ResponseDataset"
       input_key: "input"
       env_name: "go_verify_task"
@@ -82,9 +81,9 @@ data:
 
 env:
   go_verify_task:
-    name: "golang_bridge_env"        
+    name: "golang_bridge_env"       
     base_urls: 
-      - "http://golang-reward-server.default.svc.cluster.local:8000" 
+      - "http://go-reward-svc" 
     num_workers: 16                 
     timeout: 30
 
@@ -113,13 +112,13 @@ grpo:
   num_generations_per_prompt: 4
   max_num_steps: 2000
   max_rollout_turns: 1
-  max_num_epochs: 10000              
+  max_num_epochs: 1
   normalize_rewards: true
   use_leave_one_out_baseline: true
   use_dynamic_sampling: false
-  val_period: 50
+  val_period: 0
   val_at_start: false
-  val_at_end: true
+  val_at_end: false
   max_val_samples: 2
   val_batch_size: 2
   overlong_filtering: false
@@ -132,7 +131,7 @@ grpo:
     stop_properly_penalty_coef: null 
   adv_estimator:
     name: "grpo"
-    args:                                
+    args:                            # FIXED: Indentation corrected
       normalize_rewards: true
       use_leave_one_out_baseline: true
   reward_scaling:
@@ -145,9 +144,9 @@ grpo:
 # 8. Policy & Generation
 policy:
   sequential_worker_init: true
-  model_name: "/mount/gcs/models/Qwen2.5-Coder-1.5B-Instruct" 
+  model_name: "/mount/gcs/models" 
   tokenizer:
-    name: "/mount/gcs/models/Qwen2.5-Coder-1.5B-Instruct"
+    name: "/mount/gcs/models"
   precision: "bfloat16"
   max_total_sequence_length: 4096
   logprob_batch_size: 1
@@ -180,8 +179,8 @@ policy:
       T_max: 2000
       eta_min: 1e-7
   dtensor_cfg:
-    enabled: false           
-    tensor_parallel_size: 1
+    enabled: true
+    tensor_parallel_size: 2
     context_parallel_size: 1
     pipeline_parallel_size: 1
     sequence_parallel: false
@@ -204,7 +203,7 @@ policy:
       enabled: true
     vllm_cfg:
       precision: ${policy.precision}
-      tensor_parallel_size: 1            
+      tensor_parallel_size: 2
       pipeline_parallel_size: 1
       gpu_memory_utilization: 0.3
       expert_parallel_size: 1
@@ -219,8 +218,10 @@ policy:
         NCCL_DEBUG: "INFO"
         HF_HOME: "/root/.cache/huggingface"
         PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:64"
+        # --- ADD THESE DEBUG FLAGS ---
         VLLM_LOG_LEVEL: "DEBUG"
         PYTHONUNBUFFERED: "1"
+      # These flags specifically print the text to the logs
       extra_kwargs:
         disable_log_requests: false
         enable_log_outputs: true

@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: golang-expert-vllm
+  namespace: default
+  labels:
+    app: golang-expert
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: golang-expert
+  template:
+    metadata:
+      labels:
+        app: golang-expert
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/memory-limit: "2Gi"
+        gke-gcsfuse/ephemeral-storage-limit: "10Gi"
+    spec:
+      serviceAccountName: nemo-ksa # Reusing your existing service account
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      initContainers:
+      - name: copy-model-to-ram
+        image: busybox:latest
+        command: 
+          - "sh"
+          - "-c"
+          - "echo 'Streaming 6.2GB model from GCS to RAM...' && mkdir -p /dev/shm/model && cp -r /mount/gcs/checkpoints/step_9/policy/weights/model/consolidated/* /dev/shm/model/ && echo 'Copy complete!'"
+        volumeMounts:
+        - name: gcs-fuse-data
+          mountPath: /mount/gcs
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+      containers:
+      - name: vllm-server
+        image: vllm/vllm-openai:latest
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+          # FIXED: Load directly from RAM to bypass FUSE mmap bottlenecks
+          - "--model=/dev/shm/model"
+          # FIXED: Pull the tokenizer directly from HuggingFace to avoid local path missing-file errors
+          - "--tokenizer=Qwen/Qwen2.5-Coder-1.5B-Instruct"
+          - "--served-model-name=golang-expert"
+          - "--max-model-len=4096"
+          - "--dtype=bfloat16"
+          - "--gpu-memory-utilization=0.9"
+          - "--port=8000"
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: "16Gi"
+          requests:
+            nvidia.com/gpu: 1
+            cpu: "4"
+            memory: "16Gi"
+        volumeMounts:
+        - name: gcs-fuse-data
+          mountPath: /mount/gcs
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: gcs-fuse-data
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: "dataset-golang-exp"
+            mountOptions: "implicit-dirs"
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "8Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: golang-expert-service
+  namespace: default
+spec:
+  selector:
+    app: golang-expert
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: LoadBalancer

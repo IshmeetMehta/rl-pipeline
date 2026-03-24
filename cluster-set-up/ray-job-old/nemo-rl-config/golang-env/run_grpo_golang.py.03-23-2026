@@ -1,7 +1,6 @@
 import argparse
 import os
 import re
-import time
 import ray
 import torch
 import requests
@@ -146,17 +145,6 @@ def main():
     m_cfg["policy"]["generation"] = configure_generation_config(gen_cfg, tokenizer)
 
     data_info = load_response_dataset(m_cfg["data"], m_cfg["grpo"]["seed"])
-    
-    # --- FIX 1: BYPASS NEMO RL'S HARDCODED 1-EPOCH LIMIT ---
-    # NeMo RL GRPO forces max_epochs=1. To reach 2000 steps with a small dataset,
-    # we artificially multiply the dataset in memory before passing it to the DataLoader.
-    try:
-        from datasets import concatenate_datasets
-        data_info.formatted_ds["train"] = concatenate_datasets([data_info.formatted_ds["train"]] * 500)
-    except Exception:
-        # Fallback if the dataset is loaded as a standard Python list
-        data_info.formatted_ds["train"] = list(data_info.formatted_ds["train"]) * 500
-
     dataset = AllTaskProcessedDataset(
         data_info.formatted_ds["train"], tokenizer, data_info.task_spec,
         {data_info.task_name: (data_info.task_spec, data_info.processor)}, 
@@ -170,21 +158,6 @@ def main():
 
     print("🚀 STARTING GRPO TRAINING")
     grpo_train(policy, policy_gen, dl, None, tokenizer, loss_fn, task_to_env, task_to_env, logger, ckpt, state, final_cfg)
-
-    # --- FIX 2: GUARANTEED SHUTDOWN HOOK FOR GCS FUSE ---
-    print(f"\n✅ Training loop finished. Activating Ray cluster hold hook...")
-    
-    # We must explicitly hold the main Python process open to keep the Kubernetes 
-    # pods alive while the FUSE sidecar uploads the final checkpoint in the background.
-    wait_time_seconds = 300 # 5 minutes
-    
-    for remaining in range(wait_time_seconds, 0, -10):
-        print(f"⏳ Holding Ray workers alive... {remaining} seconds remaining for GCS background upload.")
-        time.sleep(10)
-
-    print("✅ GCS FUSE sync window complete!")
-    ray.shutdown()
-    print("🛑 Shutdown complete.")
 
 if __name__ == "__main__":
     main()
