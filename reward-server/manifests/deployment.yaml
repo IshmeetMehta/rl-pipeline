@@ -31,7 +31,7 @@ spec:
         cloud.google.com/gke-nodepool: sandbox 
       containers:
       - name: reward-server
-        image: us-central1-docker.pkg.dev/my-project-4-386519/rl-pipeline/reward-server:v1
+        image: us-central1-docker.pkg.dev/YOUR_PROJECT_ID/reward-repo/go-reward-server:latest
         # Forces Kubernetes to pull the latest version of :v1 every time
         imagePullPolicy: Always
         ports:

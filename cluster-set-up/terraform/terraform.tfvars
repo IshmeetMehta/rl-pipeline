@@ -1,0 +1,4 @@
+project_id   = "YOUR_PROJECT_ID_HERE"
+region       = "us-central1"
+zone         = "us-central1-a"
+cluster_name = "nemo-rl-ray"
