@@ -17,7 +17,6 @@ spec:
       metadata:
         annotations:
           gke-gcsfuse/volumes: "true"
-          # --- GCS FUSE SIDECAR TUNING ---
           gke-gcsfuse/cpu-limit: "2"
           gke-gcsfuse/memory-limit: "4Gi"
           gke-gcsfuse/ephemeral-storage-limit: "50Gi"
@@ -28,6 +27,7 @@ spec:
         nodeSelector:
           cloud.google.com/gke-nodepool: ray-head-pool
         containers:
+        # 1. Main Ray Head Container
         - name: ray-head
           image: nvcr.io/nvidia/nemo-rl:v0.5.0
           resources:
@@ -35,21 +35,42 @@ spec:
               cpu: "30"
               memory: "115Gi"
             requests:
-              cpu: "28"
-              memory: "110Gi"
+              cpu: "24"
+              memory: "90Gi"
+          # lifecycle:
+          #   postStart:
+          #     exec:
+          #       command:
+          #       - /bin/bash
+          #       - -c
+          #       - "source /opt/nemo_rl_venv/bin/activate && uv pip install --link-mode=copy --force-reinstall 'ray[default]'"
           volumeMounts:
           - name: gcs-fuse-data
             mountPath: /mount/gcs
           - name: dshm
             mountPath: /dev/shm
+        
+        # 2. TensorBoard Sidecar
+        - name: tensorboard
+          image: nvcr.io/nvidia/nemo-rl:v0.5.0
+          command: ["/bin/bash", "-c"]
+          args: ["source /opt/nemo_rl_venv/bin/activate && tensorboard --logdir /mount/gcs/logs --host 0.0.0.0 --port 6006"]
+          ports:
+          - containerPort: 6006
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+          volumeMounts:
+          - name: gcs-fuse-data
+            mountPath: /mount/gcs
+            
         volumes:
         - name: gcs-fuse-data
           csi:
             driver: gcsfuse.csi.storage.gke.io
             volumeAttributes:
-              # --- 1. POINT TO NEW HNS BUCKET ---
-              bucketName: "dataset-golang-exp" 
-              # --- 2. APPLY AI/ML PERFORMANCE CACHING FLAGS ---
+              bucketName: "nemo-rl-experiments-rl-pipeline" 
               mountOptions: "implicit-dirs"
         - name: dshm
           emptyDir:
@@ -57,11 +78,11 @@ spec:
             sizeLimit: "60Gi"
 
   ##############################################################################
-  # WORKER NODES
+  # WORKER NODES (NVIDIA RTX PRO 6000 - G4)
   ##############################################################################
   workerGroupSpecs:
-  - groupName: dual-l4-workers
-    replicas: 2
+  - groupName: rtx-pro-6000-workers
+    replicas: 2 
     minReplicas: 2
     maxReplicas: 2
     rayStartParams:
@@ -70,7 +91,6 @@ spec:
       metadata:
         annotations:
           gke-gcsfuse/volumes: "true"
-          # --- GCS FUSE SIDECAR TUNING ---
           gke-gcsfuse/cpu-limit: "2"
           gke-gcsfuse/memory-limit: "4Gi"
           gke-gcsfuse/ephemeral-storage-limit: "50Gi"
@@ -78,29 +98,32 @@ spec:
           ray.io/node-type: worker
       spec:
         serviceAccountName: nemo-ksa
-        nodeSelector:
-          cloud.google.com/gke-nodepool: gpu-multi-worker-pool
-          cloud.google.com/gke-accelerator: nvidia-l4
+        # nodeSelector:
+        #   cloud.google.com/gke-nodepool: g4-gpu-worker-pool
+        #   cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
+        # FIXED: Added all required tolerations for GPUs and Spot/Preemptible instances
         tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"
           effect: "NoSchedule"
-        - key: "sku"
+        - key: "cloud.google.com/gke-spot"
           operator: "Equal"
-          value: "gpu"
+          value: "true"
           effect: "NoSchedule"
+          
         containers:
         - name: ray-worker
           image: nvcr.io/nvidia/nemo-rl:v0.5.0
           resources:
             limits:
               nvidia.com/gpu: 2
-              cpu: "22"
-              memory: "88Gi"
+              cpu: "92"    # G4-standard-96 has 96 vCPUs
+              memory: "360Gi" # G4-standard-96 has 384Gi RAM
             requests:
               nvidia.com/gpu: 2
-              cpu: "20"
-              memory: "80Gi"
+              cpu: "88"
+              # FIXED: Lowered to 320Gi to clear the 369GB allocatable ceiling
+              memory: "320Gi"
           env:
           - name: NCCL_DEBUG
             value: "INFO"
@@ -116,11 +139,9 @@ spec:
           csi:
             driver: gcsfuse.csi.storage.gke.io
             volumeAttributes:
-              # --- 1. POINT TO NEW HNS BUCKET ---
-              bucketName: "dataset-golang-exp"
-              # --- 2. APPLY AI/ML PERFORMANCE CACHING FLAGS ---
+              bucketName: "nemo-rl-experiments-rl-pipeline"
               mountOptions: "implicit-dirs"
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: "40Gi"
+            sizeLimit: "100Gi"

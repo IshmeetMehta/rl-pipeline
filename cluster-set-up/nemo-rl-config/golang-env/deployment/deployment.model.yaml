@@ -21,14 +21,15 @@ spec:
     spec:
       serviceAccountName: nemo-ksa # Reusing your existing service account
       nodeSelector:
-        cloud.google.com/gke-accelerator: nvidia-l4
+        cloud.google.com/gke-nodepool: g4-gpu-worker-pool
+        cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
       initContainers:
       - name: copy-model-to-ram
         image: busybox:latest
         command: 
           - "sh"
           - "-c"
-          - "echo 'Streaming 6.2GB model from GCS to RAM...' && mkdir -p /dev/shm/model && cp -r /mount/gcs/checkpoints/step_9/policy/weights/model/consolidated/* /dev/shm/model/ && echo 'Copy complete!'"
+          - "echo 'Streaming model weights from GCS to RAM...' && mkdir -p /dev/shm/model && cp -r /mount/gcs/checkpoints/step_4/policy/weights/model/consolidated/* /dev/shm/model/ && echo 'Copy complete!'"
         volumeMounts:
         - name: gcs-fuse-data
           mountPath: /mount/gcs
@@ -71,7 +72,7 @@ spec:
         csi:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
-            bucketName: "dataset-golang-exp"
+            bucketName: "nemo-rl-experiments-rl-pipeline"
             mountOptions: "implicit-dirs"
       - name: dshm
         emptyDir:

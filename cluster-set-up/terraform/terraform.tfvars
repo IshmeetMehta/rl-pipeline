@@ -1,4 +1,5 @@
-project_id   = "YOUR_PROJECT_ID_HERE"
-region       = "us-central1"
-zone         = "us-central1-a"
+project_id   = "rl-golang"
+region       = "us-west1"
+zone         = "us-west1-a"
 cluster_name = "nemo-rl-ray"
+bucket_name  = "nemo-rl-experiments-rl-pipeline"

@@ -11,7 +11,28 @@ This project provides a complete environment and execution path to fine-tune `Qw
 
 ---
 
-## Step 1: Infrastructure, Storage & IAM (Terraform)
+## 🛠 Prerequisites: Configure your Environment
+
+Before running any commands, you MUST create a `terraform.tfvars` file in the `cluster-set-up/terraform/` directory to specify your GCP project details.
+
+1. **Create the file**:
+   ```bash
+   touch cluster-set-up/terraform/terraform.tfvars
+   ```
+
+2. **Add these variables**:
+   ```hcl
+   project_id   = "your-gcp-project-id"  # Your unique GCP Project ID
+   region       = "us-west1"             # Chosen Region (G4s are common here)
+   zone         = "us-west1-a"           # Chosen Zone
+   cluster_name = "nemo-rl-ray"          # Desired cluster name
+   bucket_name  = "your-unique-bucket"   # MUST be globally unique
+   ```
+
+---
+
+## Step 1: Provision Infrastructure with Terraform
+age & IAM (Terraform)
 
 Terraform provisions the GKE cluster, the specialized node pools, the storage bucket, and the necessary **Workload Identity** (KSA/GSA) permissions for GCS access.
 
@@ -29,7 +50,7 @@ Terraform provisions the GKE cluster, the specialized node pools, the storage bu
    terraform apply
    ```
    **This creates:**
-   - **GKE Cluster** with Head, GPU (L4), and Sandbox (gVisor) pools.
+   - **GKE Cluster** with Head, GPU (RTX PRO 6000), and Sandbox (gVisor) pools.
    - **GCS Bucket** with Hierarchical Namespace (HNS) enabled.
    - **Artifact Registry Repository**: `reward-repo` for Docker images.
    - **GCP Service Account (GSA)**: `nemo-gsa` with Storage Admin roles.
@@ -42,15 +63,21 @@ Terraform provisions the GKE cluster, the specialized node pools, the storage bu
 
 Configure your GCS storage by uploading the RL dataset and the base model weights.
 
-1. **Upload RL Dataset**:
+1. **Install HuggingFace CLI**:
+   Ensure you have the CLI tools:
    ```bash
-   gcloud storage cp dataset/golang_prompts.jsonl gs://dataset-golang-exp/datasets/
+   pip install "huggingface_hub[cli]"
    ```
 
 2. **Stage Base Model**:
    ```bash
-   huggingface-cli download Qwen/Qwen2.5-Coder-1.5B-Instruct
-   gcloud storage cp -r ~/.cache/huggingface/hub gs://dataset-golang-exp/models/
+   uvx hf download Qwen/Qwen2.5-Coder-1.5B-Instruct --local-dir ./qwen-gcs-upload
+   gsutil -m cp -r ./qwen-gcs-upload/* gs://nemo-rl-experiments-rl-pipeline/models/Qwen2.5-Coder-1.5B-Instruct/
+   ```
+3. **Upload RL Dataset**:
+   ```bash
+   gcloud storage cp dataset/golang_prompts.jsonl gs://nemo-rl-experiments-rl-pipeline/datasets/golang_prompts.jsonl
+   gcloud storage cp dataset/golang_val.jsonl gs://nemo-rl-experiments-rl-pipeline/datasets/golang_val.jsonl
    ```
 
 ---
@@ -63,7 +90,7 @@ To isolate the Go compilation environment and prevent RCE, we deploy a FastAPI s
    Replace `{REGION}` with your chosen region (e.g., `us-central1`):
    ```bash
    cd reward-server
-   gcloud builds submit . --config=cloudbuild.yaml --substitutions=_DESTINATION="{REGION}-docker.pkg.dev/$(gcloud config get-value project)/reward-repo/go-reward-server:latest"
+   gcloud builds submit . --config=cloudbuild.yaml --substitutions=_DESTINATION="{REGION}-docker.pkg.dev/$(gcloud config get-value project)/reward-repo/go-reward-server:v1"
    ```
 
 2. **Deploy the Service**:
@@ -74,9 +101,9 @@ To isolate the Go compilation environment and prevent RCE, we deploy a FastAPI s
 
 ---
 
-## Step 4: Deploy the Ray Cluster
+## Step 4: Deploy the Ray Cluster - Launching the Worker and Head Nodes
 
-Deploy the Ray head and worker nodes using the optimized manifests.
+Deploy the Ray head and worker nodes using the optimized manifests for **NVIDIA RTX PRO 6000**.
 
 1. **Apply Ray Cluster Manifests**:
    ```bash
@@ -89,10 +116,11 @@ Deploy the Ray head and worker nodes using the optimized manifests.
 ## Step 5: Configure & Run Training
 
 1. **Stage Training Files**:
-   Copy the training runner and the configuration to the GCS bucket root (`/mount/gcs/`):
+   Copy the training runner and the nemoRl configuration files to the GCS bucket root (`/mount/gcs/`):
    ```bash
-   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/run_grpo_golang.py gs://dataset-golang-exp/
-   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/debug_grpo.yaml gs://dataset-golang-exp/configs/
+ 
+   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/run_grpo_golang.py gs://nemo-rl-experiments-rl-pipeline/run_grpo_golang.py
+   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/debug_grpo.yaml gs://nemo-rl-experiments-rl-pipeline/configs/debug_grpo.yaml
    ```
 
 2. **Execute on Ray Head**:

@@ -1,5 +1,5 @@
 # ==============================================================================
-# NeMo RL GRPO - FINAL PRODUCTION CONFIG (Go Coding Tasks)
+# NeMo RL GRPO - CLEAN SMOKE TEST CONFIG (Go Coding Tasks)
 # ==============================================================================
 
 logger:
@@ -28,8 +28,6 @@ checkpointing:
   metric_name: "train:reward"
   keep_top_k: 1
   higher_is_better: true
-  # FIX for OSError [Errno 24]: GCS FUSE does not support atomic renames well.
-  # Disabling atomic save prevents the 'tmp_step_X' -> 'step_X' rename loop.
   save_atomic: false                 
   save_consolidated: true
   model_save_format: "safetensors"
@@ -48,8 +46,8 @@ trainer:
   accelerator: gpu
   gradient_clip_val: 1.0
   gradient_clip_algorithm: norm
-  max_steps: 2000
-  max_epochs: 10000            # FIXED: Forces PyTorch Lightning to loop the dataset continuously
+  max_steps: 4                 # <--- TEST LIMIT: 4 steps
+  max_epochs: 1                # <--- Clean standard ML epoch limit
   accumulate_grad_batches: 1
 
 data:
@@ -84,7 +82,7 @@ env:
   go_verify_task:
     name: "golang_bridge_env"        
     base_urls: 
-      - "http://golang-reward-server.default.svc.cluster.local:8000" 
+      - "http://go-reward-svc.default.svc.cluster.local:80"  # <--- CORRECT URL
     num_workers: 16                 
     timeout: 30
 
@@ -109,16 +107,16 @@ loss_fn:
 
 grpo:
   seed: 42
-  num_prompts_per_step: 1
-  num_generations_per_prompt: 4
+  num_prompts_per_step: 2        # <--- GRPO MATH: 2 prompts
+  num_generations_per_prompt: 4  # <--- GRPO MATH: 4 gens (2x4 = 8 responses)
   max_num_steps: 2000
   max_rollout_turns: 1
-  max_num_epochs: 10000              
+  max_num_epochs: 1              # <--- Clean standard ML epoch limit 
   normalize_rewards: true
   use_leave_one_out_baseline: true
   use_dynamic_sampling: false
-  val_period: 50
-  val_at_start: false
+  val_period: 2          # <--- Force it to run every 2 steps!
+  val_at_start: true     # <--- Force a sanity check before Step 1!
   val_at_end: true
   max_val_samples: 2
   val_batch_size: 2
@@ -145,9 +143,9 @@ grpo:
 # 8. Policy & Generation
 policy:
   sequential_worker_init: true
-  model_name: "/mount/gcs/models/Qwen2.5-Coder-1.5B-Instruct" 
+  model_name: "/mount/gcs/models" 
   tokenizer:
-    name: "/mount/gcs/models/Qwen2.5-Coder-1.5B-Instruct"
+    name: "/mount/gcs/models"
   precision: "bfloat16"
   max_total_sequence_length: 4096
   logprob_batch_size: 1
@@ -157,7 +155,7 @@ policy:
   model:
     torch_dtype: bfloat16
   train_micro_batch_size: 2 
-  train_global_batch_size: 4
+  train_global_batch_size: 8     # <--- BATCH MATH: 4 GPUs * 2 = 8
   max_grad_norm: 1.0
   sequence_packing:
     enabled: false
@@ -180,7 +178,7 @@ policy:
       T_max: 2000
       eta_min: 1e-7
   dtensor_cfg:
-    enabled: false           
+    enabled: true              # <--- DTENSOR ENABLED
     tensor_parallel_size: 1
     context_parallel_size: 1
     pipeline_parallel_size: 1

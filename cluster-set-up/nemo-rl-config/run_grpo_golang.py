@@ -75,9 +75,7 @@ register_processor("golang_processor", golang_processor)
 class GolangRemoteEnv(EnvironmentInterface):
     def __init__(self, config):
         self.base_url = config.get("base_urls")[0]
-        # Use a session to reuse TCP connections and file descriptors
         self.session = requests.Session()
-        # Increase connection pool size to match GRPO rollout concurrency
         adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
         self.session.mount('http://', adapter)
 
@@ -93,7 +91,6 @@ class GolangRemoteEnv(EnvironmentInterface):
             test_info = metadata[i].get("extra_env_info", {})
             
             try:
-                # Use self.session instead of requests directly
                 response = self.session.post(
                     url, 
                     json={"response": raw_response, "extra_env_info": test_info}, 
@@ -101,6 +98,7 @@ class GolangRemoteEnv(EnvironmentInterface):
                 )
                 reward = float(response.json().get("reward", 0.0))
             except Exception as e:
+                print(f"⚠️ Reward Server Error: {e}")
                 reward = 0.0
             
             results.append(reward)
@@ -145,37 +143,48 @@ def main():
         gen_cfg[k] = gen_cfg.get(k, None)
     m_cfg["policy"]["generation"] = configure_generation_config(gen_cfg, tokenizer)
 
+    # Allow NeMo to build task_spec and processor configs
     data_info = load_response_dataset(m_cfg["data"], m_cfg["grpo"]["seed"])
     
-    # --- FIX 1: BYPASS NEMO RL'S HARDCODED 1-EPOCH LIMIT ---
-    # NeMo RL GRPO forces max_epochs=1. To reach 2000 steps with a small dataset,
-    # we artificially multiply the dataset in memory before passing it to the DataLoader.
-    try:
-        from datasets import concatenate_datasets
-        data_info.formatted_ds["train"] = concatenate_datasets([data_info.formatted_ds["train"]] * 500)
-    except Exception:
-        # Fallback if the dataset is loaded as a standard Python list
-        data_info.formatted_ds["train"] = list(data_info.formatted_ds["train"]) * 500
+    # ==============================================================================
+    # EXPLICIT DATA LOADING DIRECTLY FROM YAML CONFIG (PRODUCTION)
+    # ==============================================================================
+    from datasets import load_dataset
+    
+    train_path = m_cfg["data"]["train"][0]["data_path"]
+    val_path = m_cfg["data"]["validation"][0]["data_path"]
+    
+    print(f"📥 Loading full Production Train data: {train_path}")
+    print(f"📥 Loading Production Val data: {val_path}")
 
+    # Load the raw files directly using Hugging Face
+    raw_train = load_dataset("json", data_files=train_path, split="train")
+    raw_val = load_dataset("json", data_files=val_path, split="train")
+
+    # Build the final NeMo formatted datasets (FIXED ROUTING HERE)
     dataset = AllTaskProcessedDataset(
-        data_info.formatted_ds["train"], tokenizer, data_info.task_spec,
-        {data_info.task_name: (data_info.task_spec, data_info.processor)}, 
+        raw_train, tokenizer, data_info.task_spec,
+        {"go_verify_task": (data_info.task_spec, data_info.processor)}, 
         max_seq_length=m_cfg["data"]["max_input_seq_length"]
     )
-    
-    env = GolangRemoteEnv.remote(m_cfg["env"][m_cfg["data"]["env_name"]]) 
-    task_to_env = {data_info.task_name: env}
 
-    (policy, policy_gen, cluster, dl, val_dl, loss_fn, logger, ckpt, state, final_cfg) = setup(m_cfg, tokenizer, dataset, None)
+    val_dataset = AllTaskProcessedDataset(
+        raw_val, tokenizer, data_info.task_spec,
+        {"go_verify_task": (data_info.task_spec, data_info.processor)}, 
+        max_seq_length=m_cfg["data"]["max_input_seq_length"]
+    )
+    # ==============================================================================
+
+    env = GolangRemoteEnv.remote(m_cfg["env"][m_cfg["data"]["env_name"]]) 
+    task_to_env = {"go_verify_task": env} # <--- FIXED ROUTING HERE
+
+    (policy, policy_gen, cluster, dl, val_dl, loss_fn, logger, ckpt, state, final_cfg) = setup(m_cfg, tokenizer, dataset, val_dataset)
 
     print("🚀 STARTING GRPO TRAINING")
-    grpo_train(policy, policy_gen, dl, None, tokenizer, loss_fn, task_to_env, task_to_env, logger, ckpt, state, final_cfg)
+    grpo_train(policy, policy_gen, dl, val_dl, tokenizer, loss_fn, task_to_env, task_to_env, logger, ckpt, state, final_cfg)
 
-    # --- FIX 2: GUARANTEED SHUTDOWN HOOK FOR GCS FUSE ---
+    # --- GUARANTEED SHUTDOWN HOOK FOR GCS FUSE ---
     print(f"\n✅ Training loop finished. Activating Ray cluster hold hook...")
-    
-    # We must explicitly hold the main Python process open to keep the Kubernetes 
-    # pods alive while the FUSE sidecar uploads the final checkpoint in the background.
     wait_time_seconds = 300 # 5 minutes
     
     for remaining in range(wait_time_seconds, 0, -10):
@@ -183,8 +192,8 @@ def main():
         time.sleep(10)
 
     print("✅ GCS FUSE sync window complete!")
-    ray.shutdown()
-    print("🛑 Shutdown complete.")
+    # ray.shutdown()
+    # print("🛑 Shutdown complete.")
 
 if __name__ == "__main__":
     main()

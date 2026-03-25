@@ -1,4 +1,5 @@
 # 0. Enable Required GCP APIs
+#B200 region  asia-east1-a
 resource "google_project_service" "services" {
   for_each = toset([
     "container.googleapis.com",
@@ -56,6 +57,28 @@ resource "google_compute_router_nat" "nat" {
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
+# 0.3 Create 1 Dedicated RoCE VPC and 8 Subnets for Blackwell GPUs
+resource "google_compute_network" "rdma_vpc" {
+  provider                = google-beta
+  name                    = "nemo-rdma-vpc"
+  auto_create_subnetworks = false
+  mtu                     = 8896 # Required jumbo frames for maximum RDMA throughput
+  
+  # Assign the hardware RoCE network profile required by A4 VMs
+  network_profile         = "projects/${var.project_id}/global/networkProfiles/${var.zone}-vpc-roce"
+  
+  depends_on              = [google_project_service.services]
+}
+
+resource "google_compute_subnetwork" "rdma_subnet" {
+  provider      = google-beta
+  count         = 8
+  name          = "nemo-rdma-sub-${count.index}"
+  ip_cidr_range = "192.168.${count.index}.0/24" # Non-overlapping ranges
+  region        = var.region
+  network       = google_compute_network.rdma_vpc.id
+}
+
 # 1. Create the Main GKE Cluster
 resource "google_container_cluster" "primary" {
   provider = google-beta
@@ -82,8 +105,11 @@ resource "google_container_cluster" "primary" {
     master_ipv4_cidr_block  = "172.16.0.0/28"
   }
 
-  # Enable Advanced datapath (Standard best practice for modern GKE)
+  # Enable Advanced datapath (Required for Multi-networking)
   datapath_provider = "ADVANCED_DATAPATH"
+  
+  # Enable Multi-Networking for GPU RDMA support
+  enable_multi_networking = true
 
   # Compliance: Shielded Nodes
   enable_shielded_nodes = true
@@ -178,10 +204,10 @@ resource "google_container_node_pool" "ray_head_pool" {
   }
 }
 
-# 3. GPU Worker Node Pool (G4 RTX PRO 6000)
+# 3. GPU Worker Node Pool (Blackwell B200)
 resource "google_container_node_pool" "gpu_worker_pool" {
   provider   = google-beta
-  name       = "g4-gpu-worker-pool"
+  name       = "gpu-multi-worker-pool"
   cluster    = google_container_cluster.primary.id
   location   = var.zone
   node_count = 1 
@@ -191,28 +217,31 @@ resource "google_container_node_pool" "gpu_worker_pool" {
     max_node_count = 2
   }
 
-  
-  # NEW: Tell the autoscaler to search all of us-central1 for Spot capacity
-  node_locations = [
-    "us-west1-a",
-    "us-west1-b"
+  depends_on = [
+    google_compute_network.rdma_vpc,
+    google_compute_subnetwork.rdma_subnet
   ]
 
-  node_config {
-    # Specify the G4 standard 96-core instance
-    machine_type = "g4-standard-96"
-    
-    disk_size_gb = 500
-    # FIXED: G4 machines require Hyperdisk, they do not support legacy pd-ssd
-    disk_type    = "hyperdisk-balanced"
+  # BIND THE RDMA NETWORKS: Map the 8 subnets from the RoCE VPC
+  network_config {
+    enable_private_nodes = true
 
-    #Tell GKE to use your Preemptible/Spot quota!
-    spot = true
+    dynamic "additional_node_network_configs" {
+      for_each = google_compute_subnetwork.rdma_subnet
+      content {
+        network    = google_compute_network.rdma_vpc.name
+        subnetwork = additional_node_network_configs.value.name
+      }
+    }
+  }
+
+  node_config {
+    machine_type = "a4-highgpu-8g" 
     
-    # GPU Accelerator: 2x NVIDIA RTX PRO 6000 
+    # GPU Accelerator: Blackwell B200 (8x per node)
     guest_accelerator {
-      type  = "nvidia-rtx-pro-6000"
-      count = 2
+      type  = "nvidia-b200"
+      count = 8
       gpu_driver_installation_config {
         gpu_driver_version = "LATEST"
       }
@@ -301,27 +330,6 @@ resource "google_storage_bucket_iam_member" "nemo_storage_admin" {
   member = "serviceAccount:${google_service_account.nemo_gsa.email}"
 }
 
-# Grant the GSA access to pull images from Artifact Registry
-resource "google_artifact_registry_repository_iam_member" "nemo_registry_reader" {
-  location   = google_artifact_registry_repository.reward_repo.location
-  repository = google_artifact_registry_repository.reward_repo.name
-  role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${google_service_account.nemo_gsa.email}"
-}
-
-# Grant the GSA logging and monitoring permissions for GKE nodes
-resource "google_project_iam_member" "nemo_logging" {
-  project = var.project_id
-  role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.nemo_gsa.email}"
-}
-
-resource "google_project_iam_member" "nemo_monitoring" {
-  project = var.project_id
-  role    = "roles/monitoring.metricWriter"
-  member  = "serviceAccount:${google_service_account.nemo_gsa.email}"
-}
-
 resource "google_service_account_iam_member" "workload_identity_user" {
   service_account_id = google_service_account.nemo_gsa.name
   role               = "roles/iam.workloadIdentityUser"
@@ -330,22 +338,6 @@ resource "google_service_account_iam_member" "workload_identity_user" {
   # Ensure the cluster is fully ready before binding Workload Identity
   depends_on = [google_container_cluster.primary]
 }
-
-# Fetch project number for CI/CD service accounts
-data "google_project" "project" {}
-
-resource "google_project_iam_member" "compute_registry_writer" {
-  project = var.project_id
-  role    = "roles/artifactregistry.writer"
-  member  = "${data.google_project.project.number}-compute@developer.gserviceaccount.com"
-}
-
-resource "google_project_iam_member" "cloudbuild_storage_admin" {
-  project = var.project_id
-  role    = "roles/storage.admin"
-  member  = "${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
-}
-# --- END CI/CD ---
 
 output "ksa_annotation" {
   value = "iam.gke.io/gcp-service-account: ${google_service_account.nemo_gsa.email}"
