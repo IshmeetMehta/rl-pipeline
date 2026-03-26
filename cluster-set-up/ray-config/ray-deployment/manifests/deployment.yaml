@@ -63,7 +63,7 @@ spec:
           csi:
             driver: gcsfuse.csi.storage.gke.io
             volumeAttributes:
-              bucketName: "nemo-rl-experiments-pipeline" 
+              bucketName: "nemo-rl-experiments-rl-pipeline" 
               mountOptions: "implicit-dirs"
         - name: dshm
           emptyDir:
@@ -94,7 +94,7 @@ spec:
         # nodeSelector:
         #   cloud.google.com/gke-nodepool: g4-gpu-worker-pool
         #   cloud.google.com/gke-accelerator: nvidia-rtx-pro-6000
-        # FIXED: Added all required tolerations for GPUs and Spot/Preemptible instances
+        # Added all required tolerations for GPUs and Spot/Preemptible instances
         tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"
@@ -132,7 +132,7 @@ spec:
           csi:
             driver: gcsfuse.csi.storage.gke.io
             volumeAttributes:
-              bucketName: "nemo-rl-experiments-pipeline"
+              bucketName: "nemo-rl-experiments-rl-pipeline"
               mountOptions: "implicit-dirs"
         - name: dshm
           emptyDir:
