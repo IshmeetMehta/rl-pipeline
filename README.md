@@ -23,8 +23,8 @@ Before running any commands, you MUST create a `terraform.tfvars` file in the `c
 2. **Add these variables**:
    ```hcl
    project_id   = "your-gcp-project-id"  # Your unique GCP Project ID
-   region       = "us-west1"             # Chosen Region (G4s are common here)
-   zone         = "us-west1-a"           # Chosen Zone
+   region       = "us-east5"             # Chosen Region (e.g., us-east5 for Spot capacity)
+   zone         = "us-east5-a"           # Chosen Zone
    cluster_name = "nemo-rl-ray"          # Desired cluster name
    bucket_name  = "your-unique-bucket"   # MUST be globally unique
    ```
@@ -186,8 +186,14 @@ The notebook will:
     ```
 4.  Save the results to `AceCode-87K-Go-Subset.jsonl`.
 
+#### 💡 Critical Documentation for the Transpiler Logic:
+- **Harness Requirements**: The generated `go_test_harness` MUST be a standalone `package main` with a `func main()`.
+- **Failure Mode**: The harness must `panic` on error to signal a failed test to the Reward Server.
+- **Isolation**: Do NOT include the solution function implementation inside the test harness; the Reward Server will automatically append the model's generated code to the harness before compilation.
+- **Schema Validation**: The notebook uses **Pydantic** for strict JSON parsing to ensure all needed fields are present for RLHF training.
+
 ### 4. Upload to GCS
 Once the `.jsonl` file is generated, upload it to your experiment bucket:
 ```bash
-gcloud storage cp AceCode-87K-Go-Subset.jsonl gs://your-bucket-name/datasets/golang_prompts.jsonl
+gcloud storage cp AceCode-87K-Go-Subset.jsonl gs://nemo-rl-experiments-pipeline/datasets/golang_prompts.jsonl
 ```
