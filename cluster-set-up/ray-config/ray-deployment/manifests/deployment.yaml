@@ -37,13 +37,6 @@ spec:
             requests:
               cpu: "24"
               memory: "90Gi"
-          # lifecycle:
-          #   postStart:
-          #     exec:
-          #       command:
-          #       - /bin/bash
-          #       - -c
-          #       - "source /opt/nemo_rl_venv/bin/activate && uv pip install --link-mode=copy --force-reinstall 'ray[default]'"
           volumeMounts:
           - name: gcs-fuse-data
             mountPath: /mount/gcs

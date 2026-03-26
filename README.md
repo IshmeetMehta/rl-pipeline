@@ -138,13 +138,56 @@ Deploy the Ray head and worker nodes using the optimized manifests for **NVIDIA 
 ## Step 6: Monitoring & Evaluation
 
 1. **Review Metrics**:
+Ray Dashboard: http://localhost:8265
    Port-forward the dashboard at `http://localhost:8265`:
    ```bash
    kubectl port-forward $HEAD_POD 8265:8265
    ```
-
-2. **Serve Expert Model**:
-   After consolidation, deploy the fine-tuned expert via vLLM:
+Tensorboard: http://localhost:6006
+   Port-forward the tensorboard at `http://localhost:6006`:
    ```bash
-   kubectl apply -f cluster-set-up/nemo-rl-config/golang-env/deployment/deployment.model.yaml
+   kubectl port-forward $HEAD_POD 6006:6006
    ```
+
+---
+
+## Step 7: Serve Expert Model
+
+After consolidation, deploy the fine-tuned expert via vLLM:
+```bash
+kubectl apply -f cluster-set-up/nemo-rl-config/golang-env/deployment/deployment.model.yaml
+```
+
+---
+
+## 📊 Dataset Generation (AceCode to Go)
+
+If you need to generate more training data, you can use the provided Jupyter notebook to transpile existing Python coding datasets (like AceCode) into Go.
+
+### 1. Open the Notebook
+Located at: `dataset/transpile_acecode_to_go.ipynb`
+
+### 2. Configure Credentials
+The notebook supports two authentication methods:
+- **Vertex AI**: Set `use_gemini_api_key = False` and provide your `project_id`.
+- **Gemini API Key**: Set `use_gemini_api_key = True` and paste your key from [Google AI Studio](https://makersuite.google.com/app/apikey).
+
+### 3. Run the Transpiler
+The notebook will:
+1.  Load the `TIGER-Lab/AceCode-87K` dataset from Hugging Face.
+2.  Use Gemini (specifically `gemini-2.5-flash`) to translate Python problems into Go functions and test harnesses.
+3.  Format the output into the NeMo RLHF structure required for this pipeline:
+    ```json
+    {
+      "input": "Write a Go function...",
+      "extra_env_info": { "test_code": "package main..." },
+      "task_name": "go_verify_task"
+    }
+    ```
+4.  Save the results to `AceCode-87K-Go-Subset.jsonl`.
+
+### 4. Upload to GCS
+Once the `.jsonl` file is generated, upload it to your experiment bucket:
+```bash
+gcloud storage cp AceCode-87K-Go-Subset.jsonl gs://your-bucket-name/datasets/golang_prompts.jsonl
+```
