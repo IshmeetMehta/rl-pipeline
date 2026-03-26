@@ -72,7 +72,7 @@ spec:
         csi:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
-            bucketName: "nemo-rl-experiments-rl-pipeline"
+            bucketName: "nemo-rl-experiments-pipeline"
             mountOptions: "implicit-dirs"
       - name: dshm
         emptyDir:

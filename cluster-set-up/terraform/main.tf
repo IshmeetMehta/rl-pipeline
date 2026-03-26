@@ -188,14 +188,15 @@ resource "google_container_node_pool" "gpu_worker_pool" {
 
   autoscaling {
     min_node_count = 0
-    max_node_count = 2
+    max_node_count = 3
   }
 
   
-  # NEW: Tell the autoscaler to search all of us-central1 for Spot capacity
+  # NEW: Tell the autoscaler to search which locations for Spot capacity
   node_locations = [
-    "us-west1-a",
-    "us-west1-b"
+    "us-east5-a",
+    "us-east5-b",
+    "us-east5-c"
   ]
 
   node_config {
@@ -337,14 +338,18 @@ data "google_project" "project" {}
 resource "google_project_iam_member" "compute_registry_writer" {
   project = var.project_id
   role    = "roles/artifactregistry.writer"
-  member  = "${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+  depends_on = [google_project_service.services]
 }
 
-resource "google_project_iam_member" "cloudbuild_storage_admin" {
+resource "google_project_iam_member" "compute_storage_admin" {
   project = var.project_id
   role    = "roles/storage.admin"
-  member  = "${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+  depends_on = [google_project_service.services]
 }
+
+
 # --- END CI/CD ---
 
 output "ksa_annotation" {

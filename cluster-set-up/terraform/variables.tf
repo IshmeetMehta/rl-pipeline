@@ -24,5 +24,5 @@ variable "cluster_name" {
 variable "bucket_name" {
   description = "The name of the GCS bucket for experiments"
   type        = string
-  default     = "nemo-rl-experiments-rl-pipeline" # Set to unique globally
+  default     = "nemo-rl-experiments-pipeline" # Set to unique globally
 }

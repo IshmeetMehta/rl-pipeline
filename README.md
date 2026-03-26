@@ -72,12 +72,12 @@ Configure your GCS storage by uploading the RL dataset and the base model weight
 2. **Stage Base Model**:
    ```bash
    uvx hf download Qwen/Qwen2.5-Coder-1.5B-Instruct --local-dir ./qwen-gcs-upload
-   gsutil -m cp -r ./qwen-gcs-upload/* gs://nemo-rl-experiments-rl-pipeline/models/Qwen2.5-Coder-1.5B-Instruct/
+   gsutil -m cp -r ./qwen-gcs-upload/* gs://nemo-rl-experiments-pipeline/models/Qwen2.5-Coder-1.5B-Instruct/
    ```
 3. **Upload RL Dataset**:
    ```bash
-   gcloud storage cp dataset/golang_prompts.jsonl gs://nemo-rl-experiments-rl-pipeline/datasets/golang_prompts.jsonl
-   gcloud storage cp dataset/golang_val.jsonl gs://nemo-rl-experiments-rl-pipeline/datasets/golang_val.jsonl
+   gcloud storage cp dataset/golang_prompts.jsonl gs://nemo-rl-experiments-pipeline/datasets/golang_prompts.jsonl
+   gcloud storage cp dataset/golang_val.jsonl gs://nemo-rl-experiments-pipeline/datasets/golang_val.jsonl
    ```
 
 ---
@@ -119,8 +119,8 @@ Deploy the Ray head and worker nodes using the optimized manifests for **NVIDIA 
    Copy the training runner and the nemoRl configuration files to the GCS bucket root (`/mount/gcs/`):
    ```bash
  
-   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/run_grpo_golang.py gs://nemo-rl-experiments-rl-pipeline/run_grpo_golang.py
-   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/debug_grpo.yaml gs://nemo-rl-experiments-rl-pipeline/configs/debug_grpo.yaml
+   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/run_grpo_golang.py gs://nemo-rl-experiments-pipeline/run_grpo_golang.py
+   gcloud storage cp cluster-set-up/nemo-rl-config/golang-env/debug_grpo.yaml gs://nemo-rl-experiments-pipeline/configs/debug_grpo.yaml
    ```
 
 2. **Execute on Ray Head**:
